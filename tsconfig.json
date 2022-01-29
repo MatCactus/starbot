@@ -1,0 +1,20 @@
+{
+    "compilerOptions": {
+        "outDir": "dist",
+        "incremental": true,
+        "pretty": true,
+
+        "strict": true,
+        "module": "CommonJS",
+        "moduleResolution": "Node",
+        "target": "ES2019",
+        "skipLibCheck": true
+    },
+
+    "include": [
+        "src"
+    ],
+    "exclude": [
+        "node_modules"
+    ]
+}
