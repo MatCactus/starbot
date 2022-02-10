@@ -8,5 +8,5 @@ setInterval(
         fs.promises
             .writeFile("./db.json", JSON.stringify(data), "utf-8")
             .then(() => console.count("save")),
-    1 * 1000 * 30
+    1 * 1000 * 15
 );
