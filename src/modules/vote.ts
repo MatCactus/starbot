@@ -1,15 +1,20 @@
 import {
-    DMChannel,
+    BaseCommandInteraction,
+    CacheType,
     Message,
     MessageActionRow,
     MessageButton,
     MessageEmbed,
-    StoreChannel,
-    TextChannel,
 } from "discord.js";
+import { isStringObject } from "util/types";
 import { client } from "..";
 import { data } from "../utils/dbFileManager";
-import { createInteraction } from "../utils/interaction";
+import { getPermLevel } from "../utils/getPermLevel";
+import {
+    createReplyHandler,
+    createComponentInteractionHandler,
+} from "../utils/interaction";
+import { loadMessage } from "../utils/loadMessage";
 import { createCommand } from "../utils/registerCommand";
 
 const voteCommand = (
@@ -34,7 +39,7 @@ const voteCommand = (
         );
 voteCommand();
 
-client.on("interactionCreate", async interaction => {
+client.on("interactionCreate", interaction => {
     if (
         !interaction.isApplicationCommand() ||
         interaction.commandName !== "vote" ||
@@ -42,115 +47,170 @@ client.on("interactionCreate", async interaction => {
     )
         return;
 
-    const userDM: DMChannel = await interaction.user.createDM();
+    createVote(interaction);
 
-    await interaction.reply({
-        ephemeral: true,
-        content: `Viens par ici => ${client.user}`,
-    });
+    interaction.deferReply();
+});
 
-    const checkVoteMessage = (await createInteraction(
+const createVote = async (interaction: BaseCommandInteraction<CacheType>) => {
+    const userDM = await interaction.user.createDM();
+
+    const { message, resMessage } = await createReplyHandler(
         {
             embeds: [
-                {
-                    color: "DARK_BUT_NOT_BLACK",
-                    description:
-                        "Réponds à ce message avec ce que tu souhaites passer au vote. Images, liens, tout est accepté.",
-                },
+                new MessageEmbed()
+                    .setDescription(
+                        `Je te laisse m'envoyer ici le contenu du Vote.\n *Tu peux utiliser les mises en forme Markdown. Tu peux également joindre une Image de tout type (GIF y comprit).*\n\nL'action se vera annulée dans 10 minutes si je n'ai recçu aucune réponse de ta part.`
+                    )
+                    .setColor("DARK_BUT_NOT_BLACK")
+                    .setThumbnail(`${interaction.guild?.iconURL()}`)
+                    .setTimestamp(),
             ],
         },
-        { type: "message" },
         userDM,
-        undefined,
         {
-            filter: e => e.author.id === interaction.user.id,
             max: 1,
-            time: 1000 * 60 * 10,
-        }
-    )) as {
-        message: Message;
-        component?: string[];
-        resMessage?: Message[];
-    };
-
-    if (!checkVoteMessage.resMessage) return;
-
-    const embed = new MessageEmbed()
-        .setTitle(`${interaction.user.tag}・ À vos Votes !!`)
-        .setDescription(checkVoteMessage.resMessage[0].content)
-        .setTimestamp();
-
-    if (checkVoteMessage.resMessage[0].attachments)
-        embed.setImage(
-            checkVoteMessage.resMessage[0].attachments.first()?.url ?? ""
-        );
-
-    const displayEmbed = await createInteraction(
-        {
-            embeds: [embed],
-            components: [
-                new MessageActionRow().addComponents(
-                    new MessageButton()
-                        .setCustomId("vote_valid")
-                        .setStyle("SUCCESS")
-                        .setEmoji("📨")
-                        .setLabel("Envoyer")
-                ),
-            ],
-        },
-        { type: "component" },
-        userDM,
-        {
-            filter: e => e.customId === "vote_valid",
-            time: 1000 * 60 * 10,
+            time: 600000,
         }
     );
 
-    if (!displayEmbed.component) return;
-    const voteMessage = await interaction.channel.send({
-        embeds: [embed],
+    if (!resMessage) return message.delete();
+    const response = resMessage.first();
+    if (!response) return message.delete();
+
+    const voteEmbed = new MessageEmbed()
+        .setDescription(response.content)
+        .setTitle(`${interaction.user.tag}・Place au Vote !!`)
+        .setTimestamp()
+        .setColor("DARK_BUT_NOT_BLACK");
+
+    if (isStringObject(response.attachments.first()?.id))
+        voteEmbed.setImage(`${response.attachments.first()?.url}`);
+
+    const componentHandler = await createComponentInteractionHandler(
+        {
+            embeds: [voteEmbed],
+            reply: { messageReference: response },
+            components: [
+                new MessageActionRow().addComponents(
+                    new MessageButton()
+                        .setLabel("Envoyer")
+                        .setCustomId(`vote_valid_${interaction.id}`)
+                        .setStyle("SUCCESS")
+                        .setEmoji("📨")
+                ),
+            ],
+        },
+        userDM,
+        {
+            time: 350000,
+            componentType: "BUTTON",
+            filter: e => e.customId.endsWith(interaction.id),
+        }
+    ).catch(e => {
+        throw new Error(e);
+    });
+
+    const finalMessage = (await interaction.editReply({
+        embeds: [voteEmbed],
         components: [
             new MessageActionRow().addComponents(
                 new MessageButton()
-                    .setCustomId(`vote_negative_${interaction.id}`)
-                    .setStyle("DANGER")
-                    .setEmoji("❌")
-                    .setLabel("Vote Contre"),
-                new MessageButton()
-                    .setCustomId(`vote_positive_${interaction.id}`)
+                    .setLabel("Pour")
                     .setStyle("SUCCESS")
-                    .setEmoji("✔")
-                    .setLabel("Vote Pour"),
+                    .setCustomId(`vote_positive_${interaction.id}`)
+                    .setEmoji("✔"),
                 new MessageButton()
+                    .setLabel("Contre")
+                    .setStyle("DANGER")
+                    .setCustomId(`vote_negative_${interaction.id}`)
+                    .setEmoji("❌"),
+                new MessageButton()
+                    .setLabel("Terminer le Vote")
+                    .setStyle("SECONDARY")
                     .setCustomId(`vote_end_${interaction.id}`)
-                    .setStyle("PRIMARY")
                     .setEmoji("⏰")
-                    .setLabel("Fin du Débat")
             ),
         ],
-    });
+    })) as Message;
+
     data.vote.push({
         authorId: interaction.user.id,
         interactionId: interaction.id,
-        message: voteMessage,
+        message: finalMessage,
         votes: [],
     });
-});
+};
 
 client.on("interactionCreate", async interaction => {
-    if (!interaction.isButton() || !interaction.customId.startsWith("vote_"))
+    if (
+        !interaction.isButton() ||
+        !interaction.customId.startsWith("vote_") ||
+        !data.vote.some(e => interaction.customId.endsWith(e.interactionId)) ||
+        !interaction.channel
+    )
         return;
 
-    const [type, interactionId] = interaction.customId
-        .replace("vote_", "")
-        .split("_") as ["negative" | "positive" | "end", string];
+    const [_, type, interactionId] = interaction.customId.split("_") as [
+        string,
+        "positive" | "negative" | "end",
+        string
+    ];
 
     if (type === "end") {
         if (
-            data.vote.find(e => e.interactionId === interactionId)?.votes
-                .length ??
-            0 > 0
+            data.vote.some(
+                e =>
+                    e.interactionId === interactionId &&
+                    (e.authorId === interaction.user.id ||
+                        getPermLevel(interaction.user.id) >= 3)
+            )
         ) {
+            if (
+                !(
+                    data.vote.find(e => e.interactionId === interactionId)
+                        ?.votes.length ?? 0 > 0
+                )
+            ) {
+                const confirmation = await createComponentInteractionHandler(
+                    {
+                        content:
+                            "Personne n'a encore voté, êtes vous sur de vouloir clore le vote ?",
+                        components: [
+                            new MessageActionRow().addComponents(
+                                new MessageButton()
+                                    .setLabel("Annuler")
+                                    .setStyle("SUCCESS")
+                                    .setCustomId(
+                                        `${interaction.customId}_cancel`
+                                    )
+                                    .setEmoji("❌"),
+                                new MessageButton()
+                                    .setLabel("Continuer")
+                                    .setStyle("DANGER")
+                                    .setCustomId(
+                                        `${interaction.customId}_confirm`
+                                    )
+                                    .setEmoji("✔")
+                            ),
+                        ],
+                    },
+                    interaction.channel,
+                    {
+                        time: 120000,
+                        filter: e =>
+                            e.user.id === interaction.user.id &&
+                            (e.customId === `${interaction.customId}_cancel` ||
+                                e.customId ===
+                                    `${interaction.customId}_confirm`),
+                    }
+                );
+                if (confirmation.resComponent.endsWith("_cancel")) {
+                    await confirmation.message.delete();
+                    return;
+                }
+            }
+
             const results = data.vote.splice(
                 data.vote.findIndex(e => e.interactionId === interactionId),
                 1
@@ -197,13 +257,11 @@ client.on("interactionCreate", async interaction => {
                 )
                 .setTimestamp();
 
-            await (
-                (
-                    client.channels.resolve(
-                        results.message.channelId
-                    ) as TextChannel
-                ).messages.resolve(results.message.id) as Message
-            )
+            loadMessage(undefined, {
+                messageId: results.message.id ?? "",
+                channelId: results.message.channelId ?? "",
+                guildId: results.message.guildId ?? "",
+            })
                 .edit({
                     components: [
                         new MessageActionRow().addComponents(
@@ -229,24 +287,31 @@ client.on("interactionCreate", async interaction => {
                                     positive.length > negative.length
                                         ? "SECONDARY"
                                         : "DANGER"
+                                ),
+                            new MessageButton()
+                                .setLabel(`Clos par ${interaction.user.tag}`)
+                                .setDisabled(true)
+                                .setStyle("PRIMARY")
+                                .setCustomId(
+                                    `vote_results_author_${interactionId}`
                                 )
                         ),
                     ],
                 })
-                .catch(e => console.error(e));
+                .catch(e => {
+                    throw new Error(e);
+                });
             await client.users
                 .resolve(results.authorId)
                 ?.send({ embeds: [Embed] });
-            interaction.reply({
-                ephemeral: true,
-                content: "Les résultats viennent d'être partagé !",
-            });
-        } else
             return interaction.reply({
                 ephemeral: true,
-                content: "Personne n'a encore voté ..",
+                content:
+                    "Les résultats d'un de vos votes viennent d'être partagés !",
             });
-    } else if (type === "positive" || type === "negative") {
+        }
+    }
+    if (type === "positive" || type === "negative") {
         const results = data.vote.find(e => e.interactionId === interactionId);
 
         if (!results) return;
@@ -259,14 +324,14 @@ client.on("interactionCreate", async interaction => {
             ).vote = type;
             return interaction.reply({
                 ephemeral: true,
-                content: "Votre changement vient bien d'être prise en compte !",
+                content: "Votre changement vient bien d'être prit en compte !",
             });
         }
 
         results.votes.push({ userId: interaction.user.id, vote: type });
         return interaction.reply({
             ephemeral: true,
-            content: "Votre vote à bien été prit en compte !",
+            content: "Votre vote a bien été prit en compte !",
         });
     }
 });
